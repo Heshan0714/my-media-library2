@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Media Vault (Google Drive Sync)</title>
+    
+    <!-- Google API Script -->
+    <script async defer src="https://apis.google.com/js/api.js"
+      onload="gapiLoaded()"></script>
+    <script async defer src="https://accounts.google.com/gsi/client"
+      onload="gisLoaded()"></script>
+
+    <style>
+        :root {
+            --primary: #4285F4; /* Google Blue */
+            --bg-body: #f8f9fa;
+            --card-bg: #ffffff;
+            --text: #202124;
+            --border: #dadce0;
+        }
+        body { font-family: 'Roboto', sans-serif; background: var(--bg-body); color: var(--text); padding: 20px; }
+        
+        .container { max-width: 800px; margin: 0 auto; }
+        .card { background: var(--card-bg); border-radius: 8px; box-shadow: 0 1px 2px rgba(60,64,67,0.3); padding: 20px; margin-bottom: 20px; }
+        
+        h2 { margin-top: 0; }
+        input, textarea { width: 100%; padding: 10px; margin: 5px 0 15px; border: 1px solid var(--border); border-radius: 4px; box-sizing: border-box; }
+        
+        button { background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: 500; }
+        button:hover { background: #3367d6; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+
+        .status { font-size: 0.9em; margin-bottom: 10px; }
+        .success { color: #188038; }
+        .error { color: #d93025; }
+
+        .preview { max-width: 100%; height: auto; border: 1px solid #eee; margin-top: 10px; display: none; }
+        #file-list li { list-style: none; border-bottom: 1px solid #eee; padding: 8px 0; display: flex; justify-content: space-between; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="card" id="login-card">
+            <h2>Media Vault Login</h2>
+            <p>Connect to Google Drive to save your files.</p>
+            <button id="authorize_button" onclick="handleAuthClick()">Authorize Google Drive</button>
+            <button id="signout_button" onclick="handleSignoutClick()" class="hidden">Sign Out</button>
+        </div>
+
+        <div class="card hidden" id="upload-card">
+            <h2>Upload to Google Drive</h2>
+            
+            <div class="status" id="status"></div>
+
+            <label>Title</label>
+            <input type="text" id="file-title" placeholder="File Name">
+
+            <label>Select File</label>
+            <input type="file" id="file-picker">
+
+            <img id="img-preview" class="preview">
+            <video id="video-preview" class="preview" controls></video>
+
+            <button id="upload-btn" onclick="uploadFile()">Upload & Save to Drive</button>
+        </div>
+
+        <div class="card hidden" id="list-card">
+            <h2>Drive Files</h2>
+            <ul id="file-list"></ul>
+            <button onclick="listFiles()">Refresh List</button>
+        </div>
+    </div>
+
+    <script>
+        // TODO: REPLACE WITH YOUR CREDENTIALS
+        const CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID_HERE';
+        const API_KEY = 'YOUR_GOOGLE_API_KEY_HERE';
+
+        // Discovery doc URL for APIs used by the quickstart
+        const DISCOVERY_DOC = 'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest';
+
+        // Authorization scopes required by the API
+        const SCOPES = 'https://www.googleapis.com/auth/drive.file';
+
+        let tokenClient;
+        let gapiInited = false;
+        let gisInited = false;
+
+        // 1. Initialize APIs
+        function gapiLoaded() {
+            gapi.load('client', initializeGapiClient);
+        }
+
+        async function initializeGapiClient() {
+            await gapi.client.init({
+                apiKey: API_KEY,
+                discoveryDocs: [DISCOVERY_DOC],
+            });
+            gapiInited = true;
+            maybeEnableButtons();
+        }
+
+        function gisLoaded() {
+            tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: CLIENT_ID,
+                scope: SCOPES,
+                callback: '', // defined later
+            });
+            gisInited = true;
+            maybeEnableButtons();
+        }
+
+        function maybeEnableButtons() {
+            if (gapiInited && gisInited) {
+                document.getElementById('authorize_button').innerText = 'Authorize Google Drive';
+            }
+        }
+
+        // 2. Auth Logic
+        function handleAuthClick() {
+            tokenClient.callback = async (resp) => {
+                if (resp.error !== undefined) {
+                    return;
+                }
+                document.getElementById('signout_button').style.display = 'inline-block';
+                document.getElementById('authorize_button').innerText = 'Refresh';
+                showDashboard();
+            };
+
+            if (gapi.client.getToken() === null) {
+                // Prompt the user to select a Google Account and ask for consent to share their data
+                tokenClient.requestAccessToken({prompt: 'consent'});
+            } else {
+                // Skip display of account chooser and consent dialog for an existing session.
+                tokenClient.requestAccessToken({prompt: ''});
+            }
+        }
+
+        function handleSignoutClick() {
+            const token = gapi.client.getToken();
+            if (token !== null) {
+                google.accounts.oauth2.revoke(token.access_token);
+                gapi.client.setToken('');
+                document.getElementById('content').innerText = '';
+                document.getElementById('authorize_button').innerText = 'Authorize Google Drive';
+                document.getElementById('signout_button').style.display = 'none';
+                
+                document.getElementById('login-card').classList.remove('hidden');
+                document.getElementById('upload-card').classList.add('hidden');
+                document.getElementById('list-card').classList.add('hidden');
+            }
+        }
+
+        function showDashboard() {
+            document.getElementById('login-card').classList.add('hidden');
+            document.getElementById('upload-card').classList.remove('hidden');
+            document.getElementById('list-card').classList.remove('hidden');
+            listFiles();
+        }
+
+        // 3. File Upload Logic
+        const fileInput = document.getElementById('file-picker');
+        fileInput.addEventListener('change', () => {
+            const file = fileInput.files[0];
+            const imgPreview = document.getElementById('img-preview');
+            const vidPreview = document.getElementById('video-preview');
+            
+            imgPreview.style.display = 'none';
+            vidPreview.style.display = 'none';
+
+            if (file) {
+                if (file.type.startsWith('image/')) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => { imgPreview.src = e.target.result; imgPreview.style.display = 'block'; };
+                    reader.readAsDataURL(file);
+                } else if (file.type.startsWith('video/')) {
+                    const videoURL = URL.createObjectURL(file);
+                    vidPreview.src = videoURL;
+                    vidPreview.style.display = 'block';
+                }
+            }
+        });
+
+        async function uploadFile() {
+            const file = fileInput.files[0];
+            const title = document.getElementById('file-title').value || file.name;
+            const statusDiv = document.getElementById('status');
+
+            if (!file) {
+                statusDiv.innerHTML = '<span class="error">Please select a file first.</span>';
+                return;
+            }
+
+            statusDiv.innerHTML = 'Uploading...';
+            document.getElementById('upload-btn').disabled = true;
+
+            const metadata = {
+                'name': title,
+                'mimeType': file.type,
+                'parents': ['root'] // Saves to My Drive root
+            };
+
+            try {
+                // Create a media object for upload
+                const media = {
+                    mimeType: file.type,
+                    body: file
+                };
+
+                // Call Drive API
+                const response = await gapi.client.drive.files.create({
+                    resource: metadata,
+                    media: media,
+                    fields: 'id, name, webViewLink'
+                });
+
+                statusDiv.innerHTML = `<span class="success">File Uploaded Successfully! ID: ${response.result.id}</span>`;
+                statusDiv.innerHTML += `<br><a href="${response.result.webViewLink}" target="_blank">View in Drive</a>`;
+                
+                document.getElementById('upload-btn').disabled = false;
+                listFiles(); // Refresh list
+
+            } catch (err) {
+                console.error(err);
+                statusDiv.innerHTML = `<span class="error">Upload failed: ${err.result.error.message}</span>`;
+                document.getElementById('upload-btn').disabled = false;
+            }
+        }
+
+        // 4. List Files Logic
+        async function listFiles() {
+            const listDiv = document.getElementById('file-list');
+            listDiv.innerHTML = 'Loading files...';
+
+            try {
+                const response = await gapi.client.drive.files.list({
+                    'pageSize': 10,
+                    'fields': 'files(id, name, webViewLink, thumbnailLink)',
+                    'orderBy': 'createdTime desc'
+                });
+
+                const files = response.result.files;
+                listDiv.innerHTML = '';
+                
+                if (!files || files.length == 0) {
+                    listDiv.innerText = 'No files found.';
+                } else {
+                    files.forEach((file) => {
+                        const li = document.createElement('li');
+                        li.innerHTML = `
+                            <span>
+                                <strong>${file.name}</strong><br>
+                                <a href="${file.webViewLink}" target="_blank">Open</a>
+                            </span>
+                            <button onclick="deleteFile('${file.id}')" style="background:#d93025; padding: 5px 10px; font-size: 12px;">Delete</button>
+                        `;
+                        listDiv.appendChild(li);
+                    });
+                }
+            } catch (err) {
+                console.error(err);
+                listDiv.innerHTML = `<span class="error">Error fetching files.</span>`;
+            }
+        }
+
+        async function deleteFile(id) {
+            if(confirm('Delete this file from Drive?')) {
+                try {
+                    await gapi.client.drive.files.delete({ fileId: id });
+                    listFiles(); // Refresh
+                } catch (err) {
+                    alert('Error deleting file');
+                }
+            }
+        }
+
+    </script>
+</body>
+</html>
